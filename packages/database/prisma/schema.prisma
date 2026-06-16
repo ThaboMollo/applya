@@ -1,0 +1,100 @@
+// Applya — Prisma schema (§7 of the spec)
+// Provider: Supabase (PostgreSQL with connection pooling via pgbouncer)
+// Run: yarn db:generate to regenerate the Prisma client
+// Run: yarn db:push to push schema changes to Supabase (dev only)
+// Run: yarn db:migrate to create + run migrations (production)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")       // connection pooling URL (port 6543)
+  directUrl = env("DIRECT_URL")         // direct connection URL (port 5432, for migrations)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Session lifecycle status
+// UPLOADED → PARSING → INVENTORY_REVIEW → (user confirms) → OPTIMISING → READY → FAILED
+// ─────────────────────────────────────────────────────────────────
+enum Status {
+  UPLOADED
+  PARSING
+  INVENTORY_REVIEW
+  OPTIMISING
+  READY
+  FAILED
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  sessions  Session[]
+  createdAt DateTime  @default(now())
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status           Status  @default(UPLOADED)
+
+  // Phase A outputs
+  resumeFileKey    String                 // Supabase Storage object key
+  resumeMimeType   String                 // application/pdf | application/vnd.openxmlformats-...
+  inventory        Json?                  // CandidateInventory — items carry origin + confidence
+  inventoryConfirmed Boolean @default(false) // GATE: Phase B cannot run until true
+
+  // Phase B outputs
+  jobDescription   String?                // raw JD text
+  jobModel         Json?                  // JobModel (Stage 3 output)
+  matchReport      Json?                  // MatchReport — covered | latent | gap, with rule
+  repositionPlan   Json?                  // RepositionPlan (Stage 5 output)
+  integrityReport  Json?                  // IntegrityReport — pass/fail per unit, split AI vs user
+  userDecisions    Json?                  // per-unit accept/reject/edit decisions
+
+  // Render outputs
+  templateId       String?
+  outputDocxKey    String?
+  outputPdfKey     String?
+
+  // Metadata
+  errorMessage     String?
+  expiresAt        DateTime               // POPIA retention TTL — auto-delete after this date
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Anti-fabrication allowlists (seeded via prisma/seed.ts)
+// ─────────────────────────────────────────────────────────────────
+
+// Controlled terminology allowlist: React.js ⇄ React ⇄ ReactJS
+// These are the DB-persisted version of packages/repositioner-core/src/allowlists/synonyms.ts
+// Keep both in sync — the in-memory list is used at runtime; the DB copy is the authoritative record.
+model SynonymGroup {
+  id        String   @id @default(cuid())
+  canonical String   @unique            // "React"
+  aliases   String[]                    // ["React.js", "ReactJS", "React JS"]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Curated, conservative "antecedent ⇒ implied skill"
+// These are the DB-persisted version of packages/repositioner-core/src/allowlists/implications.ts
+// SCOPE RULE: near-certain technical implications only (Express ⇒ Node.js; NOT AWS ⇒ DevOps)
+model ImplicationRule {
+  id         String   @id @default(cuid())
+  antecedent String                     // "Express" (must be present in the inventory)
+  implies    String                     // "Node.js"
+  note       String                     // rationale, for auditability
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([antecedent, implies])
+}

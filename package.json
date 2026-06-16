@@ -1,0 +1,37 @@
+{
+  "name": "applya",
+  "version": "1.0.0",
+  "description": "Applya — resume re-positioning without fabrication",
+  "packageManager": "yarn@1.22.22",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "turbo run db:generate --filter=@applya/database",
+    "db:push": "turbo run db:push --filter=@applya/database",
+    "db:migrate": "turbo run db:migrate --filter=@applya/database",
+    "db:studio": "yarn workspace @applya/database prisma studio"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThaboMollo/applya.git"
+  },
+  "author": "Thabo Mponya",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ThaboMollo/applya/issues"
+  },
+  "homepage": "https://github.com/ThaboMollo/applya#readme",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "turbo": "^2.9.18",
+    "typescript": "^5.4.0"
+  }
+}
