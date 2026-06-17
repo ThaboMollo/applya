@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "dockerfilePath": "",
+    "dockerImage": "quay.io/docling-project/docling-serve:latest",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 120,
+    "startCommand": "",
+    "sleepApplication": true,
+    "numReplicas": 1
+  }
+}

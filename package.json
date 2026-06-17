@@ -14,10 +14,11 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "db:generate": "turbo run db:generate --filter=@applya/database",
-    "db:push": "turbo run db:push --filter=@applya/database",
-    "db:migrate": "turbo run db:migrate --filter=@applya/database",
-    "db:studio": "yarn workspace @applya/database prisma studio"
+    "db:generate": "yarn workspace @applya/database db:generate",
+    "db:push": "yarn workspace @applya/database db:push",
+    "db:migrate": "yarn workspace @applya/database db:migrate",
+    "db:seed": "yarn workspace @applya/database db:seed",
+    "db:studio": "yarn workspace @applya/database db:studio"
   },
   "repository": {
     "type": "git",

@@ -15,3 +15,4 @@ export * from './allowlists/implications';
 export * from './validator/index';
 export * from './parser/index';
 export * from './engine/gemini.engine';
+export * from './renderer/index';

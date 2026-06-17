@@ -6,27 +6,21 @@ import { getImpliedSkills, ImplicationRule, IMPLICATION_RULES } from '../allowli
 /**
  * Stage 6 — Programmatic Validator (deterministic gate).
  *
- * This is the integrity guarantee in code, not vibes. It runs after Stage 5
- * generation and before any output reaches the user.
- *
- * A claim is PERMITTED if and only if it is:
- *   1. In the confirmed inventory (exact match or via synonym allowlist)
- *   2. A curated implication (antecedent is in inventory + rule exists in allowlist)
+ * A claim is PERMITTED iff it is:
+ *   1. In the confirmed inventory (exact or via synonym allowlist)
+ *   2. A curated implication (antecedent present + rule in allowlist)
  *   3. User-attested (origin: "attested" in the confirmed inventory)
  *
- * Anything else → fail. This is called once per rewritten bullet/skill.
+ * Anything else → fail. Runs after Stage 5, before output reaches the user.
  *
  * NUMERIC RULE: every number in a rewrite must appear verbatim in the cited source text.
- * No exceptions — this kills invented metrics.
- *
- * PROFICIENCY RULE: if proficiency_stated is "none" or a lower level, the rewrite
- * may not claim a higher proficiency. Upgrades are blocked.
+ * PROFICIENCY RULE: rewrite may not claim higher proficiency than source states.
+ * ENTITY RULE: known tech terms (from synonym allowlist) not in the permitted set → fail.
  */
 export class Validator {
   private readonly synonymLookup: Map<string, string>;
-  private readonly impliedSkills: Set<string>;
-  private readonly attestedSkills: Set<string>;
-  private readonly inventorySkillNames: Set<string>;
+  /** All permitted entity names (canonical, lowercase) */
+  private readonly permittedEntities: Set<string>;
 
   constructor(
     private readonly inventory: CandidateInventory,
@@ -34,17 +28,38 @@ export class Validator {
   ) {
     this.synonymLookup = buildSynonymLookup();
 
-    const allSkillNames = inventory.skills.map((s) => s.name);
-    this.inventorySkillNames = new Set(allSkillNames.map((n) => n.toLowerCase()));
+    // Collect all raw entity names from inventory — skills section + bullet entities
+    const rawEntityNames: string[] = [
+      ...inventory.skills.map((s) => s.name),
+      ...inventory.experiences.flatMap((e) => e.bullets).flatMap((b) => [
+        ...b.entities.skills,
+        ...b.entities.tools,
+      ]),
+      ...inventory.projects.flatMap((p) => p.bullets).flatMap((b) => [
+        ...b.entities.skills,
+        ...b.entities.tools,
+      ]),
+    ];
 
-    const implied = getImpliedSkills(allSkillNames, implicationRules);
-    this.impliedSkills = new Set(implied.map((i) => i.implied.toLowerCase()));
-
-    this.attestedSkills = new Set(
-      inventory.skills
-        .filter((s) => s.origin === 'attested')
-        .map((s) => s.name.toLowerCase()),
+    // Resolve all to canonical form
+    const canonicalInventoryEntities = rawEntityNames.map((n) =>
+      resolveCanonical(n, this.synonymLookup).toLowerCase(),
     );
+
+    // Skills implied by inventory via curated rules
+    const implied = getImpliedSkills(rawEntityNames, implicationRules);
+    const impliedCanonicals = implied.map((i) => i.implied.toLowerCase());
+
+    // User-attested skills
+    const attestedCanonicals = inventory.skills
+      .filter((s) => s.origin === 'attested')
+      .map((s) => resolveCanonical(s.name, this.synonymLookup).toLowerCase());
+
+    this.permittedEntities = new Set([
+      ...canonicalInventoryEntities,
+      ...impliedCanonicals,
+      ...attestedCanonicals,
+    ]);
   }
 
   validatePlan(plan: RepositionPlan): IntegrityReport {
@@ -75,14 +90,17 @@ export class Validator {
       },
       user_change_summary: {
         attested: this.inventory.skills.filter((s) => s.origin === 'attested').length,
-        edited: this.inventory.skills.filter((s) => s.origin === 'edited').length +
-          this.inventory.experiences.flatMap((e) => e.bullets).filter((b) => b.origin === 'edited').length,
+        edited:
+          this.inventory.skills.filter((s) => s.origin === 'edited').length +
+          this.inventory.experiences
+            .flatMap((e) => e.bullets)
+            .filter((b) => b.origin === 'edited').length,
       },
     };
   }
 
   validateBullet(unitId: string, rewrittenText: string, sourceText: string | null): ValidationResult {
-    // 1. Numeric check — every number in rewrite must appear in source
+    // 1. Numeric check — every number in rewrite must appear verbatim in source
     const numericViolation = this.checkNumericTokens(rewrittenText, sourceText ?? '');
     if (numericViolation) {
       return { unit_id: unitId, result: 'fail', reason: numericViolation, rule_violated: 'metric_invented' };
@@ -94,6 +112,12 @@ export class Validator {
       return { unit_id: unitId, result: 'fail', reason: proficiencyViolation, rule_violated: 'proficiency_inflated' };
     }
 
+    // 3. Entity check — known tech terms from the synonym allowlist not in permitted set → fail
+    const entityViolation = this.checkEntityViolation(rewrittenText);
+    if (entityViolation) {
+      return { unit_id: unitId, result: 'fail', reason: entityViolation, rule_violated: 'skill_not_in_inventory' };
+    }
+
     return { unit_id: unitId, result: 'pass' };
   }
 
@@ -101,23 +125,9 @@ export class Validator {
     const canonical = resolveCanonical(skillName, this.synonymLookup);
     const lower = canonical.toLowerCase();
 
-    if (
-      this.inventorySkillNames.has(lower) ||
-      this.impliedSkills.has(lower) ||
-      this.attestedSkills.has(lower)
-    ) {
+    if (this.permittedEntities.has(lower)) {
       return { unit_id: skillName, result: 'pass' };
     }
-
-    // Also check if it appears in any bullet entity
-    const inBullet = this.inventory.experiences
-      .flatMap((e) => e.bullets)
-      .some((b) =>
-        b.entities.skills.some((s) => resolveCanonical(s, this.synonymLookup).toLowerCase() === lower) ||
-        b.entities.tools.some((t) => resolveCanonical(t, this.synonymLookup).toLowerCase() === lower),
-      );
-
-    if (inBullet) return { unit_id: skillName, result: 'pass' };
 
     return {
       unit_id: skillName,
@@ -127,8 +137,48 @@ export class Validator {
     };
   }
 
+  /**
+   * Check if any known tech term (from the synonym allowlist) appears in the rewritten text
+   * but is NOT in the permitted entity set. This catches skills the model introduced that
+   * were never in the candidate's resume.
+   *
+   * Coverage: terms in our synonym allowlist only. Terms not in the list may slip through
+   * to Stage 7 (LLM judge). This is by design — Stage 6 is deterministic and auditable.
+   */
+  private checkEntityViolation(rewrittenText: string): string | null {
+    // Skip permitted canonicals to avoid redundant checks across their aliases.
+    // For non-permitted canonicals, EVERY alias must be tested — the canonical form
+    // ("kubernetes") might not appear in the text, but an alias ("k8s") might.
+    const permittedChecked = new Set<string>();
+
+    for (const [aliasLower, canonical] of this.synonymLookup) {
+      const canonicalLower = canonical.toLowerCase();
+
+      // If this canonical is permitted, mark it and skip all its aliases
+      if (this.permittedEntities.has(canonicalLower)) {
+        permittedChecked.add(canonicalLower);
+        continue;
+      }
+      if (permittedChecked.has(canonicalLower)) continue;
+
+      // Term is NOT permitted — does this alias appear in the rewrite?
+      const escaped = aliasLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      try {
+        // Treat . _ - as word-internal separators so "JS" doesn't match ".js" in "React.js"
+        const regex = new RegExp(`(?<![a-zA-Z0-9._\\-])${escaped}(?![a-zA-Z0-9._\\-])`, 'i');
+        if (regex.test(rewrittenText)) {
+          return `"${canonical}" appears in rewrite but is not in the candidate inventory, a curated implication, or user-attested`;
+        }
+      } catch {
+        // Skip terms that produce invalid regex after escaping (edge case)
+      }
+    }
+
+    return null;
+  }
+
   private checkNumericTokens(rewrite: string, source: string): string | null {
-    const numericPattern = /\b\d[\d,.]*/g;
+    const numericPattern = /\b\d[\d,.]*%?/g;
     const rewriteNumbers = rewrite.match(numericPattern) ?? [];
     for (const num of rewriteNumbers) {
       if (!source.includes(num)) {
@@ -138,11 +188,12 @@ export class Validator {
     return null;
   }
 
-  private checkProficiencyUpgrade(rewrite: string, _source: string): string | null {
-    const upgradeWords = ['expert', 'expert-level', 'senior', 'lead', 'architected', 'mastery'];
+  private checkProficiencyUpgrade(rewrite: string, source: string): string | null {
+    const upgradeWords = ['expert', 'expert-level', 'architected', 'mastery', 'principal'];
     const rewriteLower = rewrite.toLowerCase();
+    const sourceLower = source.toLowerCase();
     for (const word of upgradeWords) {
-      if (rewriteLower.includes(word) && !_source.toLowerCase().includes(word)) {
+      if (rewriteLower.includes(word) && !sourceLower.includes(word)) {
         return `Proficiency term "${word}" in rewrite is not supported by source text`;
       }
     }

@@ -9,8 +9,13 @@ import {
   UploadedFile,
   UseInterceptors,
   Sse,
+  BadRequestException,
+  UseGuards,
+  Req,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Request } from 'express';
+import { SupabaseAuthGuard } from '../auth/auth.guard';
 import { Observable } from 'rxjs';
 import { SessionsService } from './sessions.service';
 import { AttachJobDto } from './dto/attach-job.dto';
@@ -18,21 +23,31 @@ import { PatchInventoryDto } from './dto/patch-inventory.dto';
 import { PatchDecisionsDto } from './dto/patch-decisions.dto';
 import { ExportDto } from './dto/export.dto';
 
-/**
- * REST surface for the Applya session lifecycle.
- * Full route contract is defined in the spec §8.
- *
- * Auth guard (Supabase JWT) is TODO — wire in once Supabase Auth is configured.
- */
+const FILE_SIZE_LIMIT = 10 * 1024 * 1024; // 10 MB
+const ALLOWED_MIME = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
+
+@UseGuards(SupabaseAuthGuard)
 @Controller('sessions')
 export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}
 
   /** POST /sessions — upload resume, create session, enqueue Phase A */
   @Post()
-  @UseInterceptors(FileInterceptor('resume'))
-  create(@UploadedFile() file: Express.Multer.File) {
-    return this.sessions.create(file);
+  @UseInterceptors(FileInterceptor('resume', {
+    limits: { fileSize: FILE_SIZE_LIMIT },
+    fileFilter: (_req, file, cb) => {
+      if (ALLOWED_MIME.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new BadRequestException('Only PDF and DOCX files are accepted'), false);
+      }
+    },
+  }))
+  create(@UploadedFile() file: Express.Multer.File, @Req() req: Request) {
+    return this.sessions.create(file, (req as Request & { dbUserId: string }).dbUserId);
   }
 
   /** POST /sessions/:id/job — attach JD text */

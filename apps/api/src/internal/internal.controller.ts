@@ -29,4 +29,15 @@ export class InternalController {
     this.internal.verifyQStashSignature(signature);
     return this.internal.runPhaseB(id);
   }
+
+  /**
+   * POST /internal/cleanup — POPIA TTL: delete sessions past their expiresAt.
+   * Triggered daily by QStash scheduled message or Vercel cron.
+   * Schedule via QStash: set destination to POST {BASE_URL}/internal/cleanup, cron: "0 2 * * *"
+   */
+  @Post('cleanup')
+  async cleanup(@Headers('upstash-signature') signature: string) {
+    await this.internal.verifyQStashSignature(signature);
+    return this.internal.runCleanup();
+  }
 }
