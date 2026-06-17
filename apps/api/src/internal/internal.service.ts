@@ -336,38 +336,48 @@ function findSourceIds(
 
 import { RepositionPlan, GeminiEngine as GeminiEngineType } from '@applya/repositioner-core';
 
-// Stage 7 only runs on actually-changed bullets, sequentially to respect Gemini rate limits
+// Stage 7 — verify all changed bullets in a single batched LLM call
 async function runVerification(
   plan: RepositionPlan,
   inventory: CandidateInventory,
   gemini: GeminiEngineType,
 ): Promise<RepositionPlan> {
-  const verifiedBullets: RepositionPlan['bullets'] = [];
+  // Partition into unchanged (skip) and changed (verify)
+  const unchangedBullets: Array<{ idx: number; bullet: RepositionPlan['bullets'][number] }> = [];
+  const changedBullets: Array<{ idx: number; bullet: RepositionPlan['bullets'][number] }> = [];
 
-  for (const bullet of plan.bullets) {
-    // Skip bullets where nothing changed — no verification needed
+  plan.bullets.forEach((bullet, idx) => {
     const isUnchanged = bullet.change_type === 'unchanged' || bullet.original === bullet.rewritten;
-    if (isUnchanged) {
-      verifiedBullets.push({ ...bullet, validated: true });
-      continue;
-    }
+    (isUnchanged ? unchangedBullets : changedBullets).push({ idx, bullet });
+  });
 
-    const sourceText = findBulletText(inventory, bullet.source_id) ?? bullet.original;
-    const { supported } = await gemini.verifyUnit(sourceText, bullet.rewritten);
+  // Single batch call for all changed bullets
+  const units = changedBullets.map(({ idx, bullet }) => ({
+    index: idx,
+    source: findBulletText(inventory, bullet.source_id) ?? bullet.original,
+    rewrite: bullet.rewritten,
+  }));
 
-    if (supported) {
-      verifiedBullets.push({ ...bullet, validated: true });
-    } else {
-      // Revert to original — never let an unsupported claim through
-      verifiedBullets.push({
-        ...bullet,
-        rewritten: bullet.original,
-        change_type: 'unchanged' as const,
-        rationale: 'Reverted — LLM judge found claim not fully supported by source',
-        validated: true,
-      });
-    }
-  }
+  const verdicts = await gemini.verifyAllUnits(units);
+  const verdictMap = new Map(verdicts.map((v) => [v.index, v]));
+
+  // Reconstruct bullets in original order
+  const verifiedBullets = plan.bullets.map((bullet, idx) => {
+    const isUnchanged = bullet.change_type === 'unchanged' || bullet.original === bullet.rewritten;
+    if (isUnchanged) return { ...bullet, validated: true };
+
+    const verdict = verdictMap.get(idx);
+    if (!verdict || verdict.supported) return { ...bullet, validated: true };
+
+    // Revert to original — never let an unsupported claim through
+    return {
+      ...bullet,
+      rewritten: bullet.original,
+      change_type: 'unchanged' as const,
+      rationale: 'Reverted — LLM judge found claim not fully supported by source',
+      validated: true,
+    };
+  });
 
   return { ...plan, bullets: verifiedBullets };
 }

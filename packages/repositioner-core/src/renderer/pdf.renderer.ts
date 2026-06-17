@@ -1,4 +1,4 @@
-import PDFDocument from 'pdfkit';
+import PDFDocument = require('pdfkit');
 import { AssembledResume } from './content-assembler';
 import { TemplateId } from './docx.renderer';
 

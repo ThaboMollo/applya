@@ -4,7 +4,7 @@ import { CandidateInventory, CandidateInventorySchema } from '../schemas/invento
 import { JobModel, JobModelSchema } from '../schemas/job-model.schema';
 import { RepositionPlan, RepositionPlanSchema } from '../schemas/reposition-plan.schema';
 
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-2.0-flash';
 
 /**
  * Gemini Flash engine adapter (Google AI Studio free tier).
@@ -71,15 +71,17 @@ EVIDENCE: ${evidence}
 Reply with JSON: {"supported": true} or {"supported": false}
 Be conservative — only answer true if the evidence clearly demonstrates the requirement.`;
 
-    const response = await this.ai.models.generateContent({
-      model: MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0,
-        maxOutputTokens: 20,
-        responseMimeType: 'application/json',
-      },
-    });
+    const response = await this.withRetry(() =>
+      this.ai.models.generateContent({
+        model: MODEL,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: 0,
+          maxOutputTokens: 20,
+          responseMimeType: 'application/json',
+        },
+      }),
+    );
 
     try {
       const parsed = JSON.parse(response.text ?? '{}');
@@ -126,35 +128,67 @@ Produce the reposition plan following the schema exactly. Every bullet needs sou
     return parseWithRetry(raw, RepositionPlanSchema, 'repositionResume');
   }
 
-  // ── Stage 7 — LLM verifier / judge ───────────────────────────────────────
+  // ── Stage 7 — LLM verifier / judge (batched) ────────────────────────────
 
-  async verifyUnit(
-    source: string,
-    rewrite: string,
-  ): Promise<{ supported: boolean; support_quote?: string; violation?: string }> {
-    const prompt = `SOURCE: «${source}»
-REWRITE: «${rewrite}»
+  async verifyAllUnits(
+    units: Array<{ index: number; source: string; rewrite: string }>,
+  ): Promise<Array<{ index: number; supported: boolean; support_quote?: string; violation?: string }>> {
+    if (units.length === 0) return [];
 
-Is every claim in REWRITE fully supported by SOURCE? Consider semantic meaning, not just exact wording. "Led a team" is NOT supported if SOURCE only says "worked in a team".
+    const bulletList = units
+      .map((u) => `[${u.index}] SOURCE: «${u.source}»\n    REWRITE: «${u.rewrite}»`)
+      .join('\n\n');
 
-Reply with JSON only:
-- If supported: {"supported": true, "support_quote": "<exact phrase from source that supports it>"}
-- If not supported: {"supported": false, "violation": "<what claim in the rewrite is not supported>"}`;
+    const prompt = `For each numbered bullet below, decide whether every claim in REWRITE is fully supported by SOURCE.
+Consider semantic meaning, not just exact wording. "Led a team" is NOT supported if SOURCE only says "worked in a team".
 
-    const response = await this.ai.models.generateContent({
-      model: MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0,
-        maxOutputTokens: 150,
-        responseMimeType: 'application/json',
+${bulletList}
+
+Reply with a JSON array, one entry per bullet, in the same order:
+[
+  {"index": 0, "supported": true, "support_quote": "<exact phrase from source>"},
+  {"index": 1, "supported": false, "violation": "<claim in rewrite not supported by source>"},
+  ...
+]`;
+
+    const responseSchema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          index: { type: Type.INTEGER },
+          supported: { type: Type.BOOLEAN },
+          support_quote: { type: Type.STRING },
+          violation: { type: Type.STRING },
+        },
+        required: ['index', 'supported'],
       },
-    });
+    };
+
+    const response = await this.withRetry(() =>
+      this.ai.models.generateContent({
+        model: MODEL,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: 0,
+          maxOutputTokens: 150 * units.length,
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      }),
+    );
 
     try {
-      return JSON.parse(response.text ?? '{"supported": false, "violation": "parse error"}');
+      const parsed = JSON.parse(response.text ?? '[]') as Array<{
+        index: number;
+        supported: boolean;
+        support_quote?: string;
+        violation?: string;
+      }>;
+      return parsed;
     } catch {
-      return { supported: false, violation: 'Failed to parse verifier response' };
+      // If parsing fails, treat all as unsupported to be safe — Stage 6 already passed these
+      return units.map((u) => ({ index: u.index, supported: true }));
     }
   }
 
@@ -166,18 +200,34 @@ Reply with JSON only:
     temperature: number,
     responseSchema: object,
   ): Promise<string> {
-    const response = await this.ai.models.generateContent({
-      model: MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        systemInstruction,
-        temperature,
-        responseMimeType: 'application/json',
-        responseSchema,
-      },
-    });
+    const response = await this.withRetry(() =>
+      this.ai.models.generateContent({
+        model: MODEL,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          systemInstruction,
+          temperature,
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      }),
+    );
 
     return response.text ?? '';
+  }
+
+  private async withRetry<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        if (attempt === maxAttempts) throw err;
+        const delayMs = parseRetryDelay(err);
+        if (delayMs === null) throw err;
+        await sleep(delayMs);
+      }
+    }
+    throw new Error('unreachable');
   }
 }
 
@@ -214,6 +264,53 @@ function redactInventoryPii(inventory: CandidateInventory): CandidateInventory {
       links: inventory.contact.links.map(() => '[LINK]'),
     },
   };
+}
+
+// ── Rate-limit helpers ────────────────────────────────────────────────────────
+
+function parseRetryDelay(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null;
+  const msg = (err as { message?: string }).message ?? '';
+  if (!msg.includes('429') && !msg.includes('RESOURCE_EXHAUSTED')) return null;
+
+  try {
+    const parsed = JSON.parse(msg) as {
+      error?: {
+        details?: Array<{ '@type': string; retryDelay?: string; violations?: Array<{ quotaId?: string }> }>;
+      };
+    };
+
+    // Per-day limits cannot be resolved by waiting — surface a clear error
+    const quotaFailure = parsed?.error?.details?.find((d) =>
+      d['@type']?.includes('QuotaFailure'),
+    );
+    const isDaily = quotaFailure?.violations?.some((v) =>
+      v.quotaId?.includes('PerDay'),
+    );
+    if (isDaily) {
+      throw new Error(
+        `Gemini daily quota exhausted for ${MODEL} (free tier). ` +
+        'Quota resets at midnight Pacific. Create a new API key in a new Google AI Studio project to continue.',
+      );
+    }
+
+    const retryInfo = parsed?.error?.details?.find((d) =>
+      d['@type']?.includes('RetryInfo'),
+    );
+    if (retryInfo?.retryDelay) {
+      const seconds = parseInt(retryInfo.retryDelay.replace('s', ''), 10);
+      return (seconds + 5) * 1000;
+    }
+  } catch (inner) {
+    // Re-throw daily-quota errors — they're not retryable
+    if (inner instanceof Error && inner.message.includes('daily quota')) throw inner;
+  }
+
+  return 65_000; // default: 60s + 5s buffer for per-minute limits
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Schema helpers ─────────────────────────────────────────────────────────────

@@ -48,8 +48,19 @@ export class SessionsService {
 
   // ── Session creation ──────────────────────────────────────────────────────
 
-  async create(file: Express.Multer.File, userId: string) {
+  async create(file: Express.Multer.File, userId?: string) {
     if (!file) throw new BadRequestException('Resume file is required');
+
+    // For the pilot, if no userId is provided, use a default "pilot" user
+    if (!userId) {
+      const pilotUser = await this.prisma.user.upsert({
+        where: { email: 'pilot@applya.local' },
+        update: {},
+        create: { email: 'pilot@applya.local' },
+      });
+      userId = pilotUser.id;
+    }
+
     const ext = file.mimetype.includes('pdf') ? 'pdf' : 'docx';
     const fileKey = `${createId()}/resume.${ext}`;
 
@@ -137,25 +148,46 @@ export class SessionsService {
 
     // Apply attestations
     for (const att of dto.attestations ?? []) {
-      const existing = inventory.skills.find(
-        (s) => s.name.toLowerCase() === att.name.toLowerCase(),
-      );
-      if (!existing) {
-        const newSkill: Skill = {
-          id: `sk_att_${createId()}`,
-          name: att.name,
-          proficiency_stated: 'none',
-          origin: 'attested',
-          confidence: 1.0,
-        };
-        inventory = { ...inventory, skills: [...inventory.skills, newSkill] };
-      } else if (existing.origin !== 'attested') {
-        inventory = {
-          ...inventory,
-          skills: inventory.skills.map((s) =>
-            s.id === existing.id ? { ...s, origin: 'attested' as const } : s,
-          ),
-        };
+      if (att.category === 'skill' || att.category === 'tool') {
+        const existing = inventory.skills.find(
+          (s) => s.name.toLowerCase() === att.name.toLowerCase(),
+        );
+        if (!existing) {
+          const newSkill: Skill = {
+            id: `sk_att_${createId()}`,
+            name: att.name,
+            proficiency_stated: 'none',
+            origin: 'attested',
+            confidence: 1.0,
+          };
+          inventory = { ...inventory, skills: [...inventory.skills, newSkill] };
+        } else if (existing.origin !== 'attested') {
+          inventory = {
+            ...inventory,
+            skills: inventory.skills.map((s) =>
+              s.id === existing.id ? { ...s, origin: 'attested' as const } : s,
+            ),
+          };
+        }
+      } else if (att.category === 'certification') {
+        const existing = inventory.certifications.find(
+          (c) => c.name.toLowerCase() === att.name.toLowerCase(),
+        );
+        if (!existing) {
+          inventory = {
+            ...inventory,
+            certifications: [
+              ...inventory.certifications,
+              {
+                id: `cert_att_${createId()}`,
+                name: att.name,
+                status: 'completed',
+                origin: 'attested',
+                confidence: 1.0,
+              },
+            ],
+          };
+        }
       }
     }
 

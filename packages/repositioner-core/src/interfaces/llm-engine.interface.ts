@@ -42,11 +42,11 @@ export interface LlmEngine {
   ): Promise<RepositionPlan>;
 
   /**
-   * Stage 7 — narrow verifier call.
-   * Returns whether every claim in `rewrite` is fully supported by `source`.
+   * Stage 7 — batch verifier call.
+   * Evaluates all changed bullets in a single LLM call instead of one call per bullet.
+   * Returns supported/violation per index.
    */
-  verifyUnit(
-    source: string,
-    rewrite: string,
-  ): Promise<{ supported: boolean; support_quote?: string; violation?: string }>;
+  verifyAllUnits(
+    units: Array<{ index: number; source: string; rewrite: string }>,
+  ): Promise<Array<{ index: number; supported: boolean; support_quote?: string; violation?: string }>>;
 }

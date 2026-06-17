@@ -27,9 +27,12 @@ export async function middleware(request: NextRequest) {
   const isProtected = request.nextUrl.pathname.startsWith('/sessions');
   const isLoginPage = request.nextUrl.pathname === '/login';
 
+  // Disabled for pilot: unauthenticated users can access protected routes
+  /*
   if (!user && isProtected) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
+  */
 
   if (user && isLoginPage) {
     return NextResponse.redirect(new URL('/', request.url));

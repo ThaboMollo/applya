@@ -29,7 +29,6 @@ const ALLOWED_MIME = [
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ];
 
-@UseGuards(SupabaseAuthGuard)
 @Controller('sessions')
 export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}
@@ -46,8 +45,8 @@ export class SessionsController {
       }
     },
   }))
-  create(@UploadedFile() file: Express.Multer.File, @Req() req: Request) {
-    return this.sessions.create(file, (req as Request & { dbUserId: string }).dbUserId);
+  create(@UploadedFile() file: Express.Multer.File) {
+    return this.sessions.create(file);
   }
 
   /** POST /sessions/:id/job — attach JD text */
